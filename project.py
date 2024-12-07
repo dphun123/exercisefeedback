@@ -4,13 +4,16 @@ import mediapipe as mp
 import numpy as np
 import time
 import matplotlib.pyplot as plt
+from scipy.signal import savgol_filter, find_peaks
 
 mp_drawing = mp.solutions.drawing_utils
 mp_drawing_styles = mp.solutions.drawing_styles
 mp_pose = mp.solutions.pose
 
+# for frame recorder
 IMAGE_SIZE = (720, 720)
 FRAME_INTERVAL = 10
+# for calculating joint angles
 UPPER_JOINTS = {
     'LEFT_SHOULDER': (
         mp_pose.PoseLandmark.LEFT_ELBOW,
@@ -56,16 +59,16 @@ LOWER_JOINTS = {
     )
 }
 JOINT_GROUPS = [UPPER_JOINTS, LOWER_JOINTS]
-SUM_ANGLE_THRESH = 5
-TOP_THRESHOLD = 150
-BOTTOM_THRESHOLD = 120
 # for joint change plot
-MAX_POINTS = 200
-UPDATE_INTERVAL = 0.5
+UPDATE_INTERVAL = 0.1
+TOP_THRESHOLD = 140
+BOTTOM_THRESHOLD = 110
+WINDOW_LENGTH = 50
 
-prev_angles = None
-all_angle_changes = []
-
+hip_angles = []
+elbow_angles = []
+top_indices = []
+bottom_indices = []
 
 def calc_angle(p1, p2, p3):
     """Calculate the angle between three points p1, p2, and p3"""
@@ -94,38 +97,26 @@ def calc_joint_angles(landmarks):
             joint_angles[joint] = angle
     return joint_angles
 
-def detect_terminal(landmarks):
-    """Detect potential terminal positions"""
-    global prev_angles
-    joint_angles = calc_joint_angles(landmarks)
-    # store prev on first
-    if prev_angles is None:
-        prev_angles = joint_angles
-        return False
-    sum_angle_change = 0
-    # sum angle change of all joints
-    for joint_group in JOINT_GROUPS:
-        for joint in joint_group.keys():
-            angle_change = abs(prev_angles[joint] - joint_angles[joint])
-            sum_angle_change += angle_change
-    all_angle_changes.append(sum_angle_change)  
-    if len(all_angle_changes) > MAX_POINTS:
-        all_angle_changes.pop(0)
-    # update prev for next
-    prev_angles = joint_angles
-    # threshold for potential terminal
-    if sum_angle_change <= SUM_ANGLE_THRESH:
-        # check the actual joint values for thresholds
-        if (joint_angles['LEFT_KNEE'] < BOTTOM_THRESHOLD and joint_angles['LEFT_HIP'] < BOTTOM_THRESHOLD or       # squat bottom
-            joint_angles['RIGHT_KNEE'] < BOTTOM_THRESHOLD and joint_angles['RIGHT_HIP'] < BOTTOM_THRESHOLD) or \
-            (joint_angles['LEFT_KNEE'] > TOP_THRESHOLD and joint_angles['LEFT_HIP'] > TOP_THRESHOLD or            # squat top
-             joint_angles['RIGHT_KNEE'] > TOP_THRESHOLD and joint_angles['RIGHT_HIP'] > TOP_THRESHOLD) or \
-            (joint_angles['LEFT_ELBOW'] < BOTTOM_THRESHOLD or joint_angles['RIGHT_ELBOW'] < BOTTOM_THRESHOLD) or \
-            (joint_angles['LEFT_ELBOW'] > TOP_THRESHOLD and joint_angles['RIGHT_ELBOW'] > TOP_THRESHOLD):
-            print(joint_angles)
-            return True
+#     #     # check the actual joint values for thresholds
+#     #     if (joint_angles['LEFT_KNEE'] < BOTTOM_THRESHOLD and joint_angles['LEFT_HIP'] < BOTTOM_THRESHOLD or       # squat bottom
+#     #         joint_angles['RIGHT_KNEE'] < BOTTOM_THRESHOLD and joint_angles['RIGHT_HIP'] < BOTTOM_THRESHOLD) or \
+#     #         (joint_angles['LEFT_KNEE'] > TOP_THRESHOLD and joint_angles['LEFT_HIP'] > TOP_THRESHOLD or            # squat top
+#     #          joint_angles['RIGHT_KNEE'] > TOP_THRESHOLD and joint_angles['RIGHT_HIP'] > TOP_THRESHOLD) or \
+#     #         (joint_angles['LEFT_ELBOW'] < BOTTOM_THRESHOLD or joint_angles['RIGHT_ELBOW'] < BOTTOM_THRESHOLD) or \
+#     #         (joint_angles['LEFT_ELBOW'] > TOP_THRESHOLD and joint_angles['RIGHT_ELBOW'] > TOP_THRESHOLD):
+#     #         print(joint_angles)
+#     #         return True
+#     elbow_joint.append((joint_angles['LEFT_ELBOW'], joint_angles['RIGHT_ELBOW']))
+#     knee_joint.append((joint_angles['LEFT_KNEE'], joint_angles['RIGHT_KNEE']))
 
-    return False
+#     return False
+
+# def detect_terminal(landmarks):
+#     """Detect potential terminal positions"""
+#     global hip_angles, elbow_angles, top_indices, bottom_indices
+#     # detect peaks and troughs
+#     top_indices, _ = find_peaks(hip_angles_smoothed, distance=20)
+#     bottom_indices, _ = find_peaks(-hip_angles_smoothed, distance=20)
 
 
 def main():
@@ -139,11 +130,15 @@ def main():
     # set up plot
     plt.ion()
     fig, ax = plt.subplots()
-    line, = ax.plot([], [])
-    threshold_line, = ax.plot([], [], color='r', linestyle='--')
-    ax.set_title('Change in Joint Angles')
+    fig.canvas.manager.window.wm_geometry("+1000+100")
+    elbows_line, = ax.plot([], [], label="Elbows", color='blue')
+    hips_line, = ax.plot([], [], label="Hips", color='red')
+    ax.axhline(y=TOP_THRESHOLD, color='black', linestyle='--', label='Top Threshold')
+    ax.axhline(y=BOTTOM_THRESHOLD, color='black', linestyle='--', label='Bottom Threshold')
+    ax.set_title('Smoothed Joint Angles')
     ax.set_xlabel('Frame')
-    ax.set_ylabel('Total Change in Joint Angles')
+    ax.set_ylabel('Average Angle (degrees)')
+    ax.legend().set_loc('lower left')
     
     last_graph_update = 0
     
@@ -157,7 +152,10 @@ def main():
           # also when video ends if video input
           if not success:
             print("Ignoring empty camera frame.")
-            #TODO: 
+            # TODO: detect terminal positions, pass them into cnn to determine exercise
+            # generate feedback for each rep
+            # open a plot for each rep that can be played back and has feedback
+            time.sleep(10)
             return
 
           # Process each frame
@@ -165,16 +163,15 @@ def main():
           image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
           results = pose.process(image)
 
-          # process landmarker results
+           # process landmarker results
           if results.pose_landmarks:
               landmarks = results.pose_landmarks.landmark
+              # record the joint angles for every interval
               if frame_num % FRAME_INTERVAL == 0:
-                  detect_terminal(landmarks)
-              # TODO: set up cnn here that checks for top/bottom positions
-              #
-              # if detect_terminal(landmarks):
-              #     print("TERMINAL POSITION DETECTED!")
-                  
+                  joint_angles = calc_joint_angles(landmarks)
+                  elbow_angles.append((joint_angles['LEFT_ELBOW'] + joint_angles['RIGHT_ELBOW']) / 2)
+                  hip_angles.append((joint_angles['LEFT_HIP'] + joint_angles['RIGHT_HIP']) / 2)
+
               # Draw the pose annotation on the image.
               image.flags.writeable = True
               image = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
@@ -188,17 +185,21 @@ def main():
               cv2.imshow('MediaPipe Pose', cv2.flip(image, 1))
               
               curr_time = time.time()
-              # draw the sum angle plot
-              if curr_time - last_graph_update >= UPDATE_INTERVAL:
-                  # update data
-                  line.set_ydata(all_angle_changes)
-                  line.set_xdata(range(len(all_angle_changes)))
-                  threshold_line.set_ydata([SUM_ANGLE_THRESH] * len(all_angle_changes))
-                  threshold_line.set_xdata(range(len(all_angle_changes)))
+              # draw the smoothed joint angle plot
+              if curr_time - last_graph_update >= UPDATE_INTERVAL and len(hip_angles) > WINDOW_LENGTH:
+                  # smooth data
+                  elbow_angles_smoothed = savgol_filter(elbow_angles, window_length=WINDOW_LENGTH, polyorder=3)
+                  knee_angles_smoothed = savgol_filter(hip_angles, window_length=WINDOW_LENGTH, polyorder=3)
+                  # update smoothed plot data
+                  elbows_line.set_ydata(elbow_angles_smoothed)
+                  elbows_line.set_xdata(range(len(elbow_angles_smoothed)))
+                  hips_line.set_ydata(knee_angles_smoothed)
+                  hips_line.set_xdata(range(len(knee_angles_smoothed)))
+                  # top_markers.set_data(top_indices, [knee_angles_smoothed[i] for i in top_indices])
+                  # bottom_markers.set_data(bottom_indices, [knee_angles_smoothed[i] for i in bottom_indices])
                   # readjust and draw
                   ax.relim()
                   ax.autoscale_view()
-                  # redraw the plot
                   fig.canvas.draw()
                   fig.canvas.flush_events()
                   
