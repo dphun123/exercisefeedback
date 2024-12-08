@@ -155,6 +155,18 @@ def main():
             # TODO: detect terminal positions, pass them into cnn to determine exercise
             # generate feedback for each rep
             # open a plot for each rep that can be played back and has feedback
+            e_minima_indices, _ = find_peaks(-elbow_angles_smoothed)
+            k_minima_indices, _ = find_peaks(-knee_angles_smoothed)
+
+
+            # Highlight the minima
+            plt.scatter(e_minima_indices, elbow_angles_smoothed[e_minima_indices], color='blue', label='Elbow Local Minima')
+            plt.scatter(k_minima_indices, knee_angles_smoothed[k_minima_indices], color='red', label='Knee Local Minima')
+
+            ax.relim()
+            ax.autoscale_view()
+            fig.canvas.draw()
+            fig.canvas.flush_events()
             time.sleep(10)
             return
 
