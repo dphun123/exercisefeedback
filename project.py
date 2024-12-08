@@ -138,7 +138,7 @@ def main():
     ax.set_title('Smoothed Joint Angles')
     ax.set_xlabel('Frame')
     ax.set_ylabel('Average Angle (degrees)')
-    ax.legend().set_loc('lower left')
+    ax.legend(loc = 'lower left')
     
     last_graph_update = 0
     
