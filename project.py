@@ -1,10 +1,16 @@
-import sys
+import argparse
 import cv2
 import mediapipe as mp
 import numpy as np
 import time
 import matplotlib.pyplot as plt
 from scipy.signal import savgol_filter, find_peaks
+from videoplayer import ExerciseVideoPlayer
+from keras import Sequential
+from keras.applications.efficientnet import preprocess_input
+from keras.layers import Input, Lambda, Dense
+from keras.applications import EfficientNetB7
+import numpy as np
 
 mp_drawing = mp.solutions.drawing_utils
 mp_drawing_styles = mp.solutions.drawing_styles
@@ -15,44 +21,44 @@ IMAGE_SIZE = (720, 720)
 FRAME_INTERVAL = 10
 # for calculating joint angles
 UPPER_JOINTS = {
-    'LEFT_SHOULDER': (
+    "LEFT_SHOULDER": (
         mp_pose.PoseLandmark.LEFT_ELBOW,
         mp_pose.PoseLandmark.LEFT_SHOULDER,
         mp_pose.PoseLandmark.LEFT_HIP
     ),
-    'RIGHT_SHOULDER': (
+    "RIGHT_SHOULDER": (
         mp_pose.PoseLandmark.RIGHT_ELBOW,
         mp_pose.PoseLandmark.RIGHT_SHOULDER,
         mp_pose.PoseLandmark.RIGHT_HIP
     ),
-    'LEFT_ELBOW': (
+    "LEFT_ELBOW": (
         mp_pose.PoseLandmark.LEFT_SHOULDER, 
         mp_pose.PoseLandmark.LEFT_ELBOW,
         mp_pose.PoseLandmark.LEFT_WRIST
     ),
-    'RIGHT_ELBOW': (
+    "RIGHT_ELBOW": (
         mp_pose.PoseLandmark.RIGHT_SHOULDER,
         mp_pose.PoseLandmark.RIGHT_ELBOW,
         mp_pose.PoseLandmark.RIGHT_WRIST
     ),
 }
 LOWER_JOINTS = {
-    'LEFT_HIP': (
+    "LEFT_HIP": (
         mp_pose.PoseLandmark.LEFT_SHOULDER,
         mp_pose.PoseLandmark.LEFT_HIP,
         mp_pose.PoseLandmark.LEFT_KNEE
     ),
-    'RIGHT_HIP': (
+    "RIGHT_HIP": (
         mp_pose.PoseLandmark.RIGHT_SHOULDER,
         mp_pose.PoseLandmark.RIGHT_HIP,
         mp_pose.PoseLandmark.RIGHT_KNEE
     ),
-    'LEFT_KNEE': (
+    "LEFT_KNEE": (
         mp_pose.PoseLandmark.LEFT_HIP,
         mp_pose.PoseLandmark.LEFT_KNEE,
         mp_pose.PoseLandmark.LEFT_ANKLE
     ),
-    'RIGHT_KNEE': (
+    "RIGHT_KNEE": (
         mp_pose.PoseLandmark.RIGHT_HIP,
         mp_pose.PoseLandmark.RIGHT_KNEE,
         mp_pose.PoseLandmark.RIGHT_ANKLE
@@ -62,13 +68,10 @@ JOINT_GROUPS = [UPPER_JOINTS, LOWER_JOINTS]
 # for joint change plot
 UPDATE_INTERVAL = 0.1
 TOP_THRESHOLD = 140
-BOTTOM_THRESHOLD = 110
+BOTTOM_THRESHOLD = 135
 WINDOW_LENGTH = 50
-
-hip_angles = []
-elbow_angles = []
-top_indices = []
-bottom_indices = []
+# for cnn
+CNN_IMAGE_SIZE = (600, 600)
 
 def calc_angle(p1, p2, p3):
     """Calculate the angle between three points p1, p2, and p3"""
@@ -98,81 +101,137 @@ def calc_joint_angles(landmarks):
     return joint_angles
 
 #     #     # check the actual joint values for thresholds
-#     #     if (joint_angles['LEFT_KNEE'] < BOTTOM_THRESHOLD and joint_angles['LEFT_HIP'] < BOTTOM_THRESHOLD or       # squat bottom
-#     #         joint_angles['RIGHT_KNEE'] < BOTTOM_THRESHOLD and joint_angles['RIGHT_HIP'] < BOTTOM_THRESHOLD) or \
-#     #         (joint_angles['LEFT_KNEE'] > TOP_THRESHOLD and joint_angles['LEFT_HIP'] > TOP_THRESHOLD or            # squat top
-#     #          joint_angles['RIGHT_KNEE'] > TOP_THRESHOLD and joint_angles['RIGHT_HIP'] > TOP_THRESHOLD) or \
-#     #         (joint_angles['LEFT_ELBOW'] < BOTTOM_THRESHOLD or joint_angles['RIGHT_ELBOW'] < BOTTOM_THRESHOLD) or \
-#     #         (joint_angles['LEFT_ELBOW'] > TOP_THRESHOLD and joint_angles['RIGHT_ELBOW'] > TOP_THRESHOLD):
+#     #     if (joint_angles["LEFT_KNEE"] < BOTTOM_THRESHOLD and joint_angles["LEFT_KNEE"] < BOTTOM_THRESHOLD or       # squat bottom
+#     #         joint_angles["RIGHT_KNEE"] < BOTTOM_THRESHOLD and joint_angles["RIGHT_KNEE"] < BOTTOM_THRESHOLD) or \
+#     #         (joint_angles["LEFT_KNEE"] > TOP_THRESHOLD and joint_angles["LEFT_KNEE"] > TOP_THRESHOLD or            # squat top
+#     #          joint_angles["RIGHT_KNEE"] > TOP_THRESHOLD and joint_angles["RIGHT_KNEE"] > TOP_THRESHOLD) or \
+#     #         (joint_angles["LEFT_ELBOW"] < BOTTOM_THRESHOLD or joint_angles["RIGHT_ELBOW"] < BOTTOM_THRESHOLD) or \
+#     #         (joint_angles["LEFT_ELBOW"] > TOP_THRESHOLD and joint_angles["RIGHT_ELBOW"] > TOP_THRESHOLD):
 #     #         print(joint_angles)
 #     #         return True
-#     elbow_joint.append((joint_angles['LEFT_ELBOW'], joint_angles['RIGHT_ELBOW']))
-#     knee_joint.append((joint_angles['LEFT_KNEE'], joint_angles['RIGHT_KNEE']))
+#     elbow_joint.append((joint_angles["LEFT_ELBOW"], joint_angles["RIGHT_ELBOW"]))
+#     knee_joint.append((joint_angles["LEFT_KNEE"], joint_angles["RIGHT_KNEE"]))
 
 #     return False
 
-# def detect_terminal(landmarks):
-#     """Detect potential terminal positions"""
-#     global hip_angles, elbow_angles, top_indices, bottom_indices
-#     # detect peaks and troughs
-#     top_indices, _ = find_peaks(hip_angles_smoothed, distance=20)
-#     bottom_indices, _ = find_peaks(-hip_angles_smoothed, distance=20)
+def track_reps(bot_indices, top_indices):
+    reps = []
+    for i, bot in enumerate(bot_indices):
+        # find nearest top before (start of rep)
+        prev_tops = top_indices[top_indices < bot]
+        if len(prev_tops) == 0:
+            continue
+        start_top = prev_tops[-1]
+        # if same top as the previous bot, skip (part of same rep)
+        if len(reps) > 0 and start_top == reps[-1][0]:
+            continue
+        # find nearest top after (end of rep)
+        next_tops = top_indices[top_indices > bot]
+        if len(next_tops) == 0:
+            continue
+        end_top = next_tops[0]
+        reps.append((start_top, bot, end_top))
+    return reps
+
+
+def detect_terminal(elbow_angles_smoothed, knee_angles_smoothed):
+    """Detect potential terminal positions"""
+    # detect peaks and troughs
+    elbow_bot_indices, _ = find_peaks(-elbow_angles_smoothed, height=-BOTTOM_THRESHOLD)
+    elbow_top_indices, _ = find_peaks(elbow_angles_smoothed, height=TOP_THRESHOLD)
+    knee_bot_indices, _ = find_peaks(-knee_angles_smoothed, height=-BOTTOM_THRESHOLD)
+    knee_top_indices, _ = find_peaks(knee_angles_smoothed,  height=TOP_THRESHOLD)
+    elbow_reps = track_reps(elbow_bot_indices, elbow_top_indices)
+    knee_reps = track_reps(knee_bot_indices, knee_top_indices)
+    if len(elbow_reps) > len(knee_reps):
+        dominant_joint = "elbow"
+        reps = elbow_reps
+    else:
+        dominant_joint = "knee"
+        reps = knee_reps
+    return dominant_joint, reps
+
+
+def classify_exercise(frames, reps):
+    """Classify the exercise based on top and bottom positions"""
+    model = Sequential([
+    Input((224, 224, 3)),
+    Lambda(lambda x: preprocess_input(x)),
+    EfficientNetB7(include_top=False, weights='imagenet', pooling='max'),
+    Dense(6, activation='softmax')
+    ])
+    model.load_weights("model.weights.h5")
+    
+    classes = ["pushup", "squat"]
+    predictions = []
+
+    for frame_index in reps[0]:
+        frame = frames[frame_index]
+        frame = cv2.resize(frame, (224,224))
+        frame = np.expand_dims(frame, axis=0)
+        prediction_array = model.predict(frame, verbose=0)
+        prediction = classes[np.argmax(prediction_array) // 2]
+        predictions.append(prediction)
+    predicted_exercise = max(set(predictions), key=predictions.count)
+    return predicted_exercise
+        
+
+# TODO
+def generate_feedback(rep):
+    return rep
 
 
 def main():
-    if len(sys.argv) == 1:
-        cap = cv2.VideoCapture(0)
-    elif len(sys.argv) == 2:
-        cap = cv2.VideoCapture(sys.argv[1])
+    parser = argparse.ArgumentParser()
+    parser.add_argument("file", nargs="?", default=0, help="Path of video file (omit for webcam)")
+    parser.add_argument("--draw", action="store_true", help="Enable live drawing of joint angles (lower FPS)")
+    args = parser.parse_args()
+
+    if args.file == "demo1":
+        file = "squat.mp4"
+    elif args.file == "demo2":
+        file = "pushup.mp4"
     else:
-        print("usage: python project.py [file]")
+        file = args.file
+    cap = cv2.VideoCapture(file)
+    
+    if not cap.isOpened():
+        print("Error: Could not open video source.")
+        return
+    print("Draw mode is", "enabled" if args.draw else "disabled")
 
     # set up plot
     plt.ion()
     fig, ax = plt.subplots()
     fig.canvas.manager.window.wm_geometry("+1000+100")
-    elbows_line, = ax.plot([], [], label="Elbows", color='blue')
-    hips_line, = ax.plot([], [], label="Hips", color='red')
-    ax.axhline(y=TOP_THRESHOLD, color='black', linestyle='--', label='Top Threshold')
-    ax.axhline(y=BOTTOM_THRESHOLD, color='black', linestyle='--', label='Bottom Threshold')
-    ax.set_title('Smoothed Joint Angles')
-    ax.set_xlabel('Frame')
-    ax.set_ylabel('Average Angle (degrees)')
-    ax.legend(loc = 'lower left')
+    elbows_line, = ax.plot([], [], label="Elbows", color="blue")
+    knees_line, = ax.plot([], [], label="Knees", color="red")
+    ax.axhline(y=TOP_THRESHOLD, color="black", linestyle="--", label="Top Threshold")
+    ax.axhline(y=BOTTOM_THRESHOLD, color="black", linestyle="--", label="Bottom Threshold")
+    ax.set_title("Smoothed Joint Angles")
+    ax.set_xlabel("Frame")
+    ax.set_ylabel("Average Angle (degrees)")
+    ax.legend(loc = "lower left")
     
+    frames = []
+    knee_angles = []
+    elbow_angles = []
+    knee_angles_smoothed = []
+    elbow_angles_smoothed = []
     last_graph_update = 0
     
     with mp_pose.Pose(
         min_detection_confidence=0.8,
         min_tracking_confidence=0.8) as pose:
-        # While camera is open
         frame_num = 0
+        # While camera is open
         while cap.isOpened():
           success, image = cap.read()
           # also when video ends if video input
           if not success:
             print("Ignoring empty camera frame.")
-            # TODO: detect terminal positions, pass them into cnn to determine exercise
-            # generate feedback for each rep
-            # open a plot for each rep that can be played back and has feedback
-            e_bot_minima_indices, _ = find_peaks(-elbow_angles_smoothed)
-            e_top_minima_indices, _ = find_peaks(elbow_angles_smoothed)
-            k_bot__minima_indices, _ = find_peaks(-knee_angles_smoothed)
-            k_top__minima_indices, _ = find_peaks(knee_angles_smoothed)
-
-
-            # Highlight the minima
-            plt.scatter(e_bot_minima_indices, elbow_angles_smoothed[e_bot_minima_indices], color='blue', label='Elbow Local Minima')
-            plt.scatter(k_bot__minima_indices, knee_angles_smoothed[k_bot__minima_indices], color='red', label='Knee Local Minima')
-            plt.scatter(e_top_minima_indices, elbow_angles_smoothed[e_top_minima_indices], color='blue', label='Elbow Local Minima')
-            plt.scatter(k_top__minima_indices, knee_angles_smoothed[k_top__minima_indices], color='red', label='Knee Local Minima')
-
-            ax.relim()
-            ax.autoscale_view()
-            fig.canvas.draw()
-            fig.canvas.flush_events()
-            time.sleep(10)
-            return
+            # draw final angle plot
+            break
 
           # Process each frame
           image.flags.writeable = False
@@ -185,8 +244,8 @@ def main():
               # record the joint angles for every interval
               if frame_num % FRAME_INTERVAL == 0:
                   joint_angles = calc_joint_angles(landmarks)
-                  elbow_angles.append((joint_angles['LEFT_ELBOW'] + joint_angles['RIGHT_ELBOW']) / 2)
-                  hip_angles.append((joint_angles['LEFT_HIP'] + joint_angles['RIGHT_HIP']) / 2)
+                  elbow_angles.append((joint_angles["LEFT_ELBOW"] + joint_angles["RIGHT_ELBOW"]) / 2)
+                  knee_angles.append((joint_angles["LEFT_KNEE"] + joint_angles["RIGHT_KNEE"]) / 2)
 
               # Draw the pose annotation on the image.
               image.flags.writeable = True
@@ -196,31 +255,33 @@ def main():
                   results.pose_landmarks,
                   mp_pose.POSE_CONNECTIONS,
                   landmark_drawing_spec=mp_drawing_styles.get_default_pose_landmarks_style())
-              # Flip the image horizontally for a selfie-view display.
+              # show the image
               image = cv2.resize(image, IMAGE_SIZE)
-              cv2.imshow('MediaPipe Pose', cv2.flip(image, 1))
+              frames.append(image)
+              cv2.imshow("MediaPipe Pose", image)
               
-              curr_time = time.time()
               # draw the smoothed joint angle plot
-              if curr_time - last_graph_update >= UPDATE_INTERVAL and len(hip_angles) > WINDOW_LENGTH:
-                  # smooth data
-                  elbow_angles_smoothed = savgol_filter(elbow_angles, window_length=WINDOW_LENGTH, polyorder=3)
-                  knee_angles_smoothed = savgol_filter(hip_angles, window_length=WINDOW_LENGTH, polyorder=3)
-                  # update smoothed plot data
-                  elbows_line.set_ydata(elbow_angles_smoothed)
-                  elbows_line.set_xdata(range(len(elbow_angles_smoothed)))
-                  hips_line.set_ydata(knee_angles_smoothed)
-                  hips_line.set_xdata(range(len(knee_angles_smoothed)))
-                  # top_markers.set_data(top_indices, [knee_angles_smoothed[i] for i in top_indices])
-                  # bottom_markers.set_data(bottom_indices, [knee_angles_smoothed[i] for i in bottom_indices])
-                  # readjust and draw
-                  ax.relim()
-                  ax.autoscale_view()
-                  fig.canvas.draw()
-                  fig.canvas.flush_events()
-                  
-                  # update last update time
-                  last_graph_update = curr_time
+              if args.draw:
+                  curr_time = time.time()
+                  if curr_time - last_graph_update >= UPDATE_INTERVAL and len(knee_angles) > WINDOW_LENGTH:
+                      # smooth data
+                      elbow_angles_smoothed = savgol_filter(elbow_angles, window_length=WINDOW_LENGTH, polyorder=3)
+                      knee_angles_smoothed = savgol_filter(knee_angles, window_length=WINDOW_LENGTH, polyorder=3)
+                      # update smoothed plot data
+                      elbows_line.set_ydata(elbow_angles_smoothed)
+                      elbows_line.set_xdata(range(len(elbow_angles_smoothed)))
+                      knees_line.set_ydata(knee_angles_smoothed)
+                      knees_line.set_xdata(range(len(knee_angles_smoothed)))
+                      # top_markers.set_data(top_indices, [knee_angles_smoothed[i] for i in top_indices])
+                      # bottom_markers.set_data(bottom_indices, [knee_angles_smoothed[i] for i in bottom_indices])
+                      # readjust and draw
+                      ax.relim()
+                      ax.autoscale_view()
+                      fig.canvas.draw()
+                      fig.canvas.flush_events()
+                      
+                      # update last update time
+                      last_graph_update = curr_time
           key = cv2.waitKey(5) & 0xFF
           # esc to cancel
           if key == 27:
@@ -231,6 +292,44 @@ def main():
                 if cv2.waitKey(5) & 0xFF == 32:
                     break
     cap.release()
+    elbow_angles_smoothed = savgol_filter(elbow_angles, window_length=WINDOW_LENGTH, polyorder=3)
+    knee_angles_smoothed = savgol_filter(knee_angles, window_length=WINDOW_LENGTH, polyorder=3)
+    # update smoothed plot data
+    elbows_line.set_ydata(elbow_angles_smoothed)
+    elbows_line.set_xdata(range(len(elbow_angles_smoothed)))
+    knees_line.set_ydata(knee_angles_smoothed)
+    knees_line.set_xdata(range(len(knee_angles_smoothed)))
+    # detect and plot terminal positions
+    dominant_joint, reps = detect_terminal(elbow_angles_smoothed, knee_angles_smoothed)
+    for (start_top, bot, end_top) in reps:
+        if dominant_joint == "elbow":
+            plt.scatter(start_top, elbow_angles_smoothed[start_top], color="green", label="Start of Rep")
+            plt.scatter(bot, elbow_angles_smoothed[bot], color="yellow", label="Bottom of Rep")
+            plt.scatter(end_top, elbow_angles_smoothed[end_top], color="purple", label="End of Rep")
+        else:
+            plt.scatter(start_top, knee_angles_smoothed[start_top], color="green", label="Start of Rep")
+            plt.scatter(bot, knee_angles_smoothed[bot], color="yellow", label="Bottom of Rep")
+            plt.scatter(end_top, knee_angles_smoothed[end_top], color="purple", label="End of Rep")
+    # readjust and draw
+    ax.relim()
+    ax.autoscale_view()
+    fig.canvas.draw()
+    fig.canvas.flush_events()
+    # pass terminal frames into cnn to classify exercise
+    exercise = classify_exercise(frames, reps)
+    print("Classified Exercise:", exercise)
+    # TODO: generate feedback for each rep
+    for rep in reps:
+        rep = generate_feedback(rep)
+    # open a plot for each rep that can be played back and has feedback
+    while True:
+        if cv2.waitKey(5) & 0xFF == 32:
+            # plt.close("all")
+            player = ExerciseVideoPlayer(frames, reps)
+            player.show()
+            while True:
+                plt.pause(0.001)
+
 
 if __name__ == "__main__":
     main()
