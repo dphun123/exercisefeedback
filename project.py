@@ -158,15 +158,15 @@ def classify_exercise(frames, reps):
     Input((224, 224, 3)),
     Lambda(lambda x: preprocess_input(x)),
     EfficientNetB7(include_top=False, weights='imagenet', pooling='max'),
-    Dense(6, activation='softmax')
+    Dense(4, activation='softmax')
     ])
     model.load_weights("model.weights.h5")
     
     classes = ["pushup", "squat"]
     predictions = []
 
-    for frame_index in reps[0]:
-        frame = frames[frame_index]
+    for (_, bottom, _) in reps:
+        frame = frames[bottom]
         frame = cv2.resize(frame, (224,224))
         frame = np.expand_dims(frame, axis=0)
         prediction_array = model.predict(frame, verbose=0)
@@ -177,8 +177,33 @@ def classify_exercise(frames, reps):
         
 
 # TODO
-def generate_feedback(rep):
-    return rep
+def generate_feedback(exercise, all_joint_angles, rep):
+    start, bottom, end = rep
+    # get the associated bottom joint angles and generate feedback
+    feedback = []
+    bottom_angles = all_joint_angles[bottom]
+    if exercise == "squat":
+        bottom_angles = {
+            "LEFT_HIP": bottom_angles["LEFT_HIP"],
+            "RIGHT_HIP": bottom_angles["RIGHT_HIP"],
+            "LEFT_KNEE": bottom_angles["LEFT_KNEE"],
+            "RIGHT_KNEE": bottom_angles["RIGHT_KNEE"]
+        }
+        if (bottom_angles["LEFT_KNEE"] + bottom_angles["RIGHT_KNEE"]) // 2 > 90:
+            feedback.append("Try to lower your hips further for a full squat. Aim for your thighs to be parallel to the ground.")
+
+    elif exercise == "pushup":
+        bottom_angles = {
+            "LEFT_SHOULDER": bottom_angles["LEFT_SHOULDER"],
+            "RIGHT_SHOULDER": bottom_angles["RIGHT_SHOULDER"],
+            "LEFT_ELBOW": bottom_angles["LEFT_ELBOW"],
+            "RIGHT_ELBOW": bottom_angles["RIGHT_ELBOW"],
+        }
+        if (bottom_angles["LEFT_ELBOW"] + bottom_angles["RIGHT_ELBOW"]) // 2 > 90:
+            feedback.append("Go lower during the down phase to engage your chest muscles fully.")
+        if (bottom_angles["LEFT_SHOULDER"] + bottom_angles["RIGHT_SHOULDER"]) // 2 > 75:
+            feedback.append("Tuck your elbows. Try not to flare your arms out too much or it may strain your shoulder.")
+    return (start, bottom, end, bottom_angles, feedback)
 
 
 def main():
@@ -214,6 +239,7 @@ def main():
     ax.legend(loc = "lower left")
     
     frames = []
+    all_joint_angles = []
     knee_angles = []
     elbow_angles = []
     knee_angles_smoothed = []
@@ -244,6 +270,7 @@ def main():
               # record the joint angles for every interval
               if frame_num % FRAME_INTERVAL == 0:
                   joint_angles = calc_joint_angles(landmarks)
+                  all_joint_angles.append(joint_angles)
                   elbow_angles.append((joint_angles["LEFT_ELBOW"] + joint_angles["RIGHT_ELBOW"]) / 2)
                   knee_angles.append((joint_angles["LEFT_KNEE"] + joint_angles["RIGHT_KNEE"]) / 2)
 
@@ -318,14 +345,14 @@ def main():
     # pass terminal frames into cnn to classify exercise
     exercise = classify_exercise(frames, reps)
     print("Classified Exercise:", exercise)
-    # TODO: generate feedback for each rep
-    for rep in reps:
-        rep = generate_feedback(rep)
+    # generate feedback for each rep
+    for i in range(len(reps)):
+        reps[i] = generate_feedback(exercise, all_joint_angles, reps[i])
     # open a plot for each rep that can be played back and has feedback
     while True:
         if cv2.waitKey(5) & 0xFF == 32:
             # plt.close("all")
-            player = ExerciseVideoPlayer(frames, reps)
+            player = ExerciseVideoPlayer(exercise, frames, reps)
             player.show()
             while True:
                 plt.pause(0.001)
